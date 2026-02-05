@@ -27,6 +27,7 @@ pub(crate) fn parse_raw_output(
     let mut current_state = ParserState::LookingForInterestingOutput;
     let mut buffer = vec![];
     let mut question = vec![];
+    let mut empty_waits: usize = 0;    
     sender
         .send(State::InProgress)
         .expect("Failed to send process start event");
@@ -78,8 +79,13 @@ pub(crate) fn parse_raw_output(
                             ParserState::WaitingForMoreQuestionContent
                         );
                         current_state = ParserState::WaitingForMoreQuestionContent;
+                        empty_waits = 0;
                     }
                     ParserState::WaitingForMoreQuestionContent => {
+                        empty_waits += 1;
+                        if empty_waits <3 {
+                            continue;
+                        }
                         log::debug!("No new weidu output, sending question to user");
                         let question_start = buffer
                             .iter()
@@ -95,6 +101,7 @@ pub(crate) fn parse_raw_output(
                             .expect("Failed to send question");
                         current_state = ParserState::LookingForInterestingOutput;
                         question.clear();
+                        empty_waits = 0;
                     }
                     _ if wait_count.load(Ordering::Relaxed) >= timeout => {
                         sender
