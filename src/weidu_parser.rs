@@ -17,7 +17,7 @@ enum ParserState {
     LookingForInterestingOutput,
 }
 
-pub(crate) fn parse_raw_output(
+pub(crate) fn parse_weidu_output(
     sender: Sender<State>,
     receiver: Receiver<String>,
     parser_config: Arc<ParserConfig>,
@@ -25,7 +25,7 @@ pub(crate) fn parse_raw_output(
     timeout: usize,
 ) {
     let mut current_state = ParserState::LookingForInterestingOutput;
-    let mut buffer = vec![];
+    let mut buffer: Vec<String> = vec![];
     let mut question = vec![];
     sender
         .send(State::InProgress)
@@ -48,7 +48,7 @@ pub(crate) fn parse_raw_output(
                             current_state = ParserState::CollectingQuestion;
                         }
                     }
-                    ParserState::LookingForInterestingOutput => {
+                    ParserState::LookingForInterestingOutput if !string.trim().is_empty() => {
                         let installer_state = parser_config.detect_weidu_finished_state(&string);
                         if installer_state != State::InProgress {
                             sender
@@ -63,13 +63,15 @@ pub(crate) fn parse_raw_output(
                                 string
                             );
                             current_state = ParserState::CollectingQuestion;
+                            question.extend_from_slice(
+                                buffer.get(max(0, buffer.len() - 5)..).unwrap_or_default(),
+                            );
                             question.push(string.clone());
                         }
-                        if !string.trim().is_empty() {
-                            log::info!("{string}");
-                            buffer.push(string);
-                        }
+                        log::info!("{string}");
+                        buffer.push(string);
                     }
+                    _ => {}
                 },
                 Err(TryRecvError::Empty) => match current_state {
                     ParserState::CollectingQuestion => {
@@ -81,17 +83,10 @@ pub(crate) fn parse_raw_output(
                     }
                     ParserState::WaitingForMoreQuestionContent => {
                         log::debug!("No new weidu output, sending question to user");
-                        let question_start = buffer
-                            .iter()
-                            .position(|n| n == question.first().unwrap_or(&"".to_string()))
-                            .unwrap_or(0);
-                        let out = buffer
-                            .get(max(question_start - 5, 0_usize)..)
-                            .unwrap_or(&question)
-                            .iter()
-                            .fold("".to_string(), |a, b| format!("{}\n{}", a, b));
                         sender
-                            .send(State::RequiresInput { question: out })
+                            .send(State::RequiresInput {
+                                question: question.join("\n"),
+                            })
                             .expect("Failed to send question");
                         current_state = ParserState::LookingForInterestingOutput;
                         question.clear();

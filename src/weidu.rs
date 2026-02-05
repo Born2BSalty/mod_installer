@@ -16,7 +16,7 @@ use config::{args::Options, parser_config::ParserConfig, state::State};
 use crate::{
     component::Component,
     utils::{get_user_input, sleep},
-    weidu_parser::parse_raw_output,
+    weidu_parser::parse_weidu_output,
 };
 
 #[cfg(windows)]
@@ -36,11 +36,11 @@ fn run(
     tick: u64,
     mut weidu_stdin: std::process::ChildStdin,
     log: Arc<RwLock<String>>,
-    parsed_output_receiver: Receiver<State>,
+    receiver: Receiver<State>,
     wait_count: Arc<AtomicUsize>,
 ) -> Result<WeiduExitStatus, Box<dyn Error + 'static>> {
     loop {
-        match parsed_output_receiver.try_recv() {
+        match receiver.try_recv() {
             Ok(state) => {
                 log::debug!("Current installer state is {state:?}");
                 match state {
@@ -94,7 +94,6 @@ fn run(
                 wait_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 log::trace!("Receiver is sleeping");
                 sleep(tick);
-
                 std::io::stdout().flush().expect("Failed to flush stdout");
             }
             Err(TryRecvError::Disconnected) => return Ok(WeiduExitStatus::Success),
@@ -102,7 +101,11 @@ fn run(
     }
 }
 
-fn create_output_reader(out: ChildStdout, log: Arc<RwLock<String>>) -> Receiver<String> {
+fn create_receiver(
+    mut child: Child,
+    out: ChildStdout,
+    log: Arc<RwLock<String>>,
+) -> Receiver<String> {
     let (tx, rx) = mpsc::channel::<String>();
     let mut buffered_reader = BufReader::new(out);
     thread::spawn(move || {
@@ -124,6 +127,19 @@ fn create_output_reader(out: ChildStdout, log: Arc<RwLock<String>>) -> Receiver<
                             tx.send(line.to_string())
                                 .expect("Failed to sent process output line");
                         });
+                    match child.try_wait() {
+                        Ok(Some(exit)) => {
+                            log::debug!("Weidu exit status: {exit}");
+                            if !exit.success() {
+                                panic!("Weidu command failed with exit status: {exit}");
+                            }
+                            break;
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            panic!("Failed to close weidu process: {err}");
+                        }
+                    }
                 }
                 Err(ref e) if e.kind() == ErrorKind::InvalidData => {
                     // sometimes there is a non-unicode gibberish in process output, it
@@ -139,7 +155,7 @@ fn create_output_reader(out: ChildStdout, log: Arc<RwLock<String>>) -> Receiver<
     rx
 }
 
-pub(crate) fn handle_io(
+pub(crate) fn handle_child_process(
     mut child: Child,
     parser_config: Arc<ParserConfig>,
     timeout: usize,
@@ -154,11 +170,11 @@ pub(crate) fn handle_io(
         .take()
         .ok_or("Failed to get weidu standard out")?;
     let log = Arc::new(RwLock::new(String::new()));
-    let raw_output_receiver = create_output_reader(weidu_stdout, log.clone());
-    let (sender, parsed_output_receiver) = mpsc::channel::<State>();
+    let raw_output_receiver = create_receiver(child, weidu_stdout, log.clone());
+    let (sender, receiver) = mpsc::channel::<State>();
 
     let wait_count = Arc::new(AtomicUsize::new(0));
-    parse_raw_output(
+    parse_weidu_output(
         sender,
         raw_output_receiver,
         parser_config,
@@ -166,33 +182,8 @@ pub(crate) fn handle_io(
         timeout,
     );
 
-    let result = run(
-        timeout,
-        tick,
-        weidu_stdin,
-        log,
-        parsed_output_receiver,
-        wait_count,
-    );
-    match child.try_wait() {
-        Ok(Some(exit)) => {
-            log::debug!("Weidu exit status: {exit}");
-            if !exit.success() {
-                return InstallationResult::Err(
-                    format!("Weidu command failed with exit status: {exit}").into(),
-                );
-            }
-            result
-        }
-        Ok(None) => {
-            log::warn!("Weidu exited, but could not get status.");
-            result
-        }
-        Err(err) => {
-            log::error!("Failed to close weidu process: {err}");
-            InstallationResult::Err(err.into())
-        }
-    }
+    // This blocks, the others are in threads
+    run(timeout, tick, weidu_stdin, log, receiver, wait_count)
 }
 
 fn generate_args(weidu_mod: &Component, weidu_log_mode: &str, language: &str) -> Vec<String> {
@@ -242,5 +233,5 @@ pub(crate) fn install(
         .spawn()
         .expect("Failed to spawn weidu process");
 
-    handle_io(child, parser_config, options.timeout, options.tick)
+    handle_child_process(child, parser_config, options.timeout, options.tick)
 }
