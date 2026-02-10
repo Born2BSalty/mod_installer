@@ -86,10 +86,12 @@ fn run(
                             && question.contains(EET_CHECK) =>
                     {
                         log::info!("🚨🚨🚨DECTECTED EET INSTALL, AUTO FILL ENABLED🚨🚨🚨");
-                        let pre_eet_directory = &format!(
-                            "{}\n",
-                            bg1_game_directory.as_ref().unwrap().to_string_lossy()
-                        );
+                        let mut pre_eet_directory =
+                            bg1_game_directory.as_ref().unwrap().to_string_lossy().to_string();
+                        if let Some(stripped) = pre_eet_directory.strip_prefix(r"\\?\") {
+                            pre_eet_directory = stripped.to_string();
+                        }
+                        pre_eet_directory.push('\n');
                         log::info!("Sending {}", pre_eet_directory);
                         weidu_stdin.write_all(pre_eet_directory.as_bytes())?;
                         eet_check_completed = true;
